@@ -97,7 +97,7 @@ def admm_step(state: SessionState, from_agent: str, to_agent: str) -> dict[str, 
         edge.dual_residuals = edge.dual_residuals[-50:]
 
     # Step 3: Dual update — accumulate inconsistency memory
-    edge.dual_variable += cb_norm
+    edge.dual_variable = (edge.dual_variable * (1.0 - state.dual_decay_rate)) + cb_norm
     edge.last_coboundary = cb_norm
     edge.iteration += 1
 
@@ -173,9 +173,21 @@ def run_full_cycle(state: SessionState) -> dict[str, Any]:
         max_dual = max(r["dual_variable"] for r in edge_reports)
         any_stalled = any(r["stalled"] for r in edge_reports)
         any_diverging = any(not r["converging"] for r in edge_reports)
+
+        # Aggregate per-agent pressure (max pressure from incident edges)
+        state.dual_pressure_per_agent = {}
+        for r in edge_reports:
+            e = state.get_edge(r["edge_id"])
+            if e:
+                for agent in [e.from_agent, e.to_agent]:
+                    state.dual_pressure_per_agent[agent] = max(
+                        state.dual_pressure_per_agent.get(agent, 0.0),
+                        r["dual_variable"]
+                    )
     else:
         mean_cb = max_dual = 0.0
         any_stalled = any_diverging = False
+        state.dual_pressure_per_agent = {}
 
     h1_found, h1_msg = detect_h1_obstruction(state)
     state.h1_obstruction = h1_found
@@ -184,23 +196,23 @@ def run_full_cycle(state: SessionState) -> dict[str, Any]:
     warnings: list[str] = []
 
     if h1_found:
-        state.closure_status = ClosureStatus.TIMEOUT
+        state.update_status(ClosureStatus.TIMEOUT)
         warnings.append(f"H1 OBSTRUCTION: {h1_msg}")
     elif any_stalled and max_dual > state.dual_warning_threshold * 2:
-        state.closure_status = ClosureStatus.TIMEOUT
+        state.update_status(ClosureStatus.TIMEOUT)
         warnings.append("ADMM stalled + high dual pressure -> coherence timeout")
     elif mean_cb > state.epsilon_primal or any_diverging:
         if max_dual > state.dual_warning_threshold:
-            state.closure_status = ClosureStatus.WARNING
+            state.update_status(ClosureStatus.WARNING)
             warnings.append(
                 f"Elevated residuals ({mean_cb:.3f} > {state.epsilon_primal}) "
                 f"and dual pressure {max_dual:.3f} > {state.dual_warning_threshold}"
             )
         else:
-            state.closure_status = ClosureStatus.WEAK
+            state.update_status(ClosureStatus.WEAK)
             warnings.append(f"Elevated residuals ({mean_cb:.3f}) -> weak lumpability")
     elif len(agents) >= 2:
-        state.closure_status = ClosureStatus.KERNEL1
+        state.update_status(ClosureStatus.KERNEL1)
 
     state.last_cycle_time = time.time()
     recovery = _recommend_recovery(state, mean_cb, max_dual, h1_found, any_stalled)
@@ -214,6 +226,7 @@ def run_full_cycle(state: SessionState) -> dict[str, Any]:
         "edges_evaluated": len(edge_reports),
         "mean_coboundary_norm": round(mean_cb, 4),
         "max_dual_variable": round(max_dual, 4),
+        "dual_pressure_per_agent": {k: round(v, 4) for k, v in state.dual_pressure_per_agent.items()},
         "h1_obstruction": h1_found,
         "h1_detail": h1_msg,
         "warnings": warnings,

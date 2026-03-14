@@ -3,13 +3,13 @@ Session state management for the Sheaf Consistency Enforcer.
 
 Holds per-session agent states, dual variables, restriction maps,
 primal residual history, and closure status.
-State persists to JSON between server restarts.
+State persists to JSON.
 """
 
 from __future__ import annotations
 
 import json
-import time
+import logging
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
@@ -25,10 +25,20 @@ class ClosureStatus(str, Enum):
 
 
 @dataclass
+class AgentState:
+    """Represents the internal consistency pressure of a single agent."""
+    pressure_p: float = 0.0      # Primal pressure
+    pressure_q: float = 0.0      # Dual pressure (rate of change)
+    last_action: str = "IDLE"
+    last_update: float = 0.0
+
+
+@dataclass
 class EdgeState:
-    """State for one directed edge between two MCP agents."""
+    """Represents the consistency state of a single sheaf edge (dual variables, residuals)."""
     from_agent: str
     to_agent: str
+    dual_claim: float = 0.0
     dual_variable: float = 0.0
     primal_residuals: list[float] = field(default_factory=list)
     dual_residuals: list[float] = field(default_factory=list)
@@ -38,6 +48,26 @@ class EdgeState:
     @property
     def edge_id(self) -> str:
         return f"{self.from_agent}\u2192{self.to_agent}"
+
+    def record_iteration(self, primal_res: float) -> float:
+        """
+        Record a new ADMM iteration for this edge.
+        Returns the dual residual (change in coboundary).
+        """
+        self.primal_residuals.append(primal_res)
+        if len(self.primal_residuals) > 50:
+            self.primal_residuals.pop(0)
+
+        dual_res = abs(primal_res - self.last_coboundary)
+        self.dual_residuals.append(dual_res)
+        if len(self.dual_residuals) > 50:
+            self.dual_residuals.pop(0)
+
+        # Record this as the baseline for next iteration's dual residual
+        self.last_coboundary = primal_res
+        self.dual_variable += primal_res
+        self.iteration += 1
+        return dual_res
 
     @property
     def pressure(self) -> float:
@@ -63,15 +93,29 @@ class EdgeState:
 @dataclass
 class SessionState:
     """Full enforcer session state."""
-    # Agent states: agent_id -> {key: value} snapshot of reported state
+    # Agent states: agent_id -> AgentState tracking pressure
+    agents: dict[str, AgentState] = field(default_factory=dict)
     agent_states: dict[str, dict[str, Any]] = field(default_factory=dict)
     agent_last_seen: dict[str, float] = field(default_factory=dict)
 
+    # Decay configuration
+    decay_rate: float = 0.95
+
+    def get_agent_state(self, agent_id: str) -> AgentState:
+        """Get or create agent state."""
+        if agent_id not in self.agents:
+            self.agents[agent_id] = AgentState()
+        return self.agents[agent_id]
+
+    def decay_agent_pressures(self, rate: float | None = None):
+        """Standard dissipative pressure decay."""
+        decay = rate if rate is not None else self.decay_rate
+        for agent in self.agents.values():
+            agent.pressure_p *= decay
+            agent.pressure_q *= decay
+
     # Restriction maps: "from->to" -> list of key mappings
     restriction_maps: dict[str, list[dict]] = field(default_factory=dict)
-
-    # Edge states keyed by "from->to"
-    edges: dict[str, EdgeState] = field(default_factory=dict)
 
     # Global cycle counter and closure status
     admm_iterations: int = 0
@@ -82,33 +126,122 @@ class SessionState:
     # Thresholds
     coherence_window_s: float = 30.0
     epsilon_primal: float = 0.15
-    dual_warning_threshold: float = 2.0
+    dual_decay_rate: float = 0.15 # Higher decay to resolve pressure faster
+    dual_pressure_per_agent: dict[str, float] = field(default_factory=dict)
+    dual_warning_threshold: float = 5.0
     max_stall_cycles: int = 10
 
+    # Edge states: "from->to" -> EdgeState
+    edges: dict[str, EdgeState] = field(default_factory=dict)
+
     def get_or_create_edge(self, from_agent: str, to_agent: str) -> EdgeState:
+        """Retrieve or create the EdgeState for a directed pair."""
         eid = f"{from_agent}\u2192{to_agent}"
         if eid not in self.edges:
             self.edges[eid] = EdgeState(from_agent=from_agent, to_agent=to_agent)
         return self.edges[eid]
 
+    def get_edge(self, edge_id: str) -> EdgeState:
+        """Retrieve the EdgeState for a given edge ID, initializing if missing."""
+        if edge_id not in self.edges:
+            from_agent, to_agent = edge_id.split("\u2192")
+            self.edges[edge_id] = EdgeState(from_agent=from_agent, to_agent=to_agent)
+        return self.edges[edge_id]
+
+    def reset_admm(self) -> None:
+        """Reset ADMM iterations and dual variables to clear inconsistency memory."""
+        self.admm_iterations = 0
+        for edge in self.edges.values():
+            edge.dual_variable = 0.0
+            edge.primal_residuals = []
+            edge.dual_residuals = []
+            edge.iteration = 0
+        self.closure_status = ClosureStatus.KERNEL1
+
+    def remove_agent(self, agent_id: str) -> bool:
+        """Remove agent and all its associated edges/maps."""
+        if agent_id not in self.agent_states:
+            return False
+        del self.agent_states[agent_id]
+        if agent_id in self.agent_last_seen:
+            del self.agent_last_seen[agent_id]
+
+        # Remove edges
+        to_del = [eid for eid in self.edges if agent_id in (eid.split("\u2192"))]
+        for eid in to_del:
+            del self.edges[eid]
+
+        # Remove restriction maps
+        to_del_maps = [
+            eid for eid in self.restriction_maps if agent_id in (eid.split("\u2192"))
+        ]
+        for eid in to_del_maps:
+            del self.restriction_maps[eid]
+
+        # Recompute closure status
+        if not self.agent_states:
+            self.closure_status = ClosureStatus.KERNEL1
+        return True
+
+    def update_status(self, new_status: ClosureStatus | str, message: str | None = None) -> None:
+        """Type-safe status updates with higher priority overrides."""
+        if not isinstance(new_status, ClosureStatus):
+            # Handle cases where the library or other components pass a string message
+            logging.info(f"STATUS MESSAGE: {new_status}")
+            if message:
+                logging.info(f"STATUS DETAIL: {message}")
+            return
+
+        # Simple priority: KERNEL1 (least) -> WEAK -> WARNING -> TIMEOUT -> KERNEL2 (most)
+        # We only escalate status levels, never de-escalate without explicit reset
+        priority = {
+            ClosureStatus.KERNEL1: 0,
+            ClosureStatus.WEAK: 1,
+            ClosureStatus.WARNING: 2,
+            ClosureStatus.TIMEOUT: 3,
+            ClosureStatus.KERNEL2: 4
+        }
+        
+        target_prio = priority.get(new_status, 0)
+        current_prio = priority.get(self.closure_status, 0)
+
+        if target_prio > current_prio:
+            old_status = self.closure_status
+            self.closure_status = new_status
+            log_msg = f"STATUS ESCALATION: {old_status.name} -> {new_status.name}"
+            if message:
+                log_msg += f" - {message}"
+            logging.info(log_msg)
+        elif target_prio < current_prio:
+            # Optionally log that we are ignoring a lower-priority state
+            pass
+        elif new_status != self.closure_status:
+            # Same priority level but different status (unlikely with current list)
+            self.closure_status = new_status
+
     def get_restriction_map(self, from_agent: str, to_agent: str) -> list[dict]:
+        """Get the restriction map for a given directed edge."""
         eid = f"{from_agent}\u2192{to_agent}"
         return self.restriction_maps.get(eid, [])
 
     def all_agents(self) -> list[str]:
+        """Return a list of all known agent IDs."""
         return list(self.agent_states.keys())
 
     def to_dict(self) -> dict:
+        """Serialize state to a dictionary."""
         d = asdict(self)
         d["closure_status"] = self.closure_status.value
         d["edges"] = {k: asdict(v) for k, v in self.edges.items()}
         return d
 
     @classmethod
-    def from_dict(cls, d: dict) -> "SessionState":
-        edges = {k: EdgeState(**v) for k, v in d.pop("edges", {}).items()}
-        status = ClosureStatus(d.pop("closure_status", "KERNEL1"))
-        obj = cls(**d)
+    def from_dict(cls, data: dict) -> "SessionState":
+        """Deserialize session state from a dictionary."""
+        # Convert edge nested dicts to EdgeState objects
+        edges = {k: EdgeState(**v) for k, v in data.pop("edges", {}).items()}
+        status = ClosureStatus(data.pop("closure_status", "KERNEL1"))
+        obj = cls(**data)
         obj.edges = edges
         obj.closure_status = status
         return obj
@@ -125,32 +258,42 @@ _session: SessionState | None = None
 
 
 def get_state() -> SessionState:
-    global _session
+    """Get the singleton session state, loading from disk if necessary."""
+    global _session # pylint: disable=global-statement
     if _session is None:
         _session = load_state()
     return _session
 
 
 def load_state() -> SessionState:
+    """Load session state from JSON file."""
+    _state = SessionState() # Initialize with default
     if _STATE_PATH.exists():
         try:
-            with open(_STATE_PATH) as f:
-                return SessionState.from_dict(json.load(f))
-        except Exception:
-            pass
-    state = SessionState()
-    _seed_default_restriction_maps(state)
-    return state
+            with open(_STATE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                _state = SessionState.from_dict(data)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logging.warning("Could not load session state from %s: %s. Initializing new state.", _STATE_PATH, e)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            logging.error("Unexpected error loading session state from %s: %s. Initializing new state.", _STATE_PATH, e)
+    _seed_default_restriction_maps(_state)
+    return _state
 
 
 def save_state() -> None:
-    if _session is not None:
-        with open(_STATE_PATH, "w") as f:
-            json.dump(_session.to_dict(), f, indent=2, default=str)
+    """Persist session state to JSON file."""
+    state = get_state()
+    try:
+        with open(_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state.to_dict(), f, indent=2)
+    except Exception as e: # pylint: disable=broad-exception-caught
+        logging.error("Could not save session state to %s: %s", _STATE_PATH, e)
 
 
 def reset_state() -> None:
-    global _session
+    """Reset the singleton session state to defaults and save."""
+    global _session # pylint: disable=global-statement
     _session = SessionState()
     _seed_default_restriction_maps(_session)
     save_state()

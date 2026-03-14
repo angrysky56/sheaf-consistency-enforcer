@@ -22,7 +22,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from .admm import run_full_cycle
+from .admm import apply_restriction_map, run_full_cycle
 from .state import ClosureStatus, get_state, reset_state, save_state
 
 mcp = FastMCP(
@@ -127,7 +127,9 @@ def get_closure_status() -> dict[str, Any]:
         "h1_obstruction": s.h1_obstruction,
         "admm_iterations": s.admm_iterations,
         "active_agents": s.all_agents(),
-        "agent_last_seen": {a: round(now - t, 1) for a, t in s.agent_last_seen.items()},
+        "agent_last_seen": {
+            a: round(now - t, 1) for a, t in s.agent_last_seen.items()
+        },
         "edge_health": edge_summaries[:6],
         "thresholds": {
             "epsilon_primal": s.epsilon_primal,
@@ -184,7 +186,11 @@ def set_restriction_map(
             if (m["from_key"], m["to_key"]) not in existing:
                 s.restriction_maps[eid].append(m)
     save_state()
-    return {"edge": eid, "map_entries": len(s.restriction_maps[eid]), "mappings": s.restriction_maps[eid]}
+    return {
+        "edge": eid,
+        "map_entries": len(s.restriction_maps[eid]),
+        "mappings": s.restriction_maps[eid]
+    }
 
 
 @mcp.tool
@@ -202,10 +208,12 @@ def get_edge_report(from_agent: str, to_agent: str) -> dict[str, Any]:
     if edge is None:
         return {"error": f"No edge data for {eid}. Run run_admm_cycle first.", "known_edges": list(s.edges.keys())}
 
-    from .admm import apply_restriction_map
     rmap = s.get_restriction_map(from_agent, to_agent)
     from_proj = apply_restriction_map(s.agent_states.get(from_agent, {}), rmap)
-    to_proj = apply_restriction_map(s.agent_states.get(to_agent, {}), s.get_restriction_map(to_agent, from_agent))
+    to_proj = apply_restriction_map(
+        s.agent_states.get(to_agent, {}),
+        s.get_restriction_map(to_agent, from_agent)
+    )
 
     return {
         "edge": eid,
@@ -219,8 +227,56 @@ def get_edge_report(from_agent: str, to_agent: str) -> dict[str, Any]:
         "restriction_map": rmap,
         "from_projected": from_proj,
         "to_projected": to_proj,
-        "interpretation": "CONSISTENT" if edge.last_coboundary < s.epsilon_primal else "INCONSISTENT",
+        "interpretation": (
+            "CONSISTENT" if edge.last_coboundary < s.epsilon_primal else "INCONSISTENT"
+        ),
     }
+
+
+def _handle_kernel_retreat(s: Any, target_agent: str | None) -> dict[str, Any]:
+    """Helper to handle kernel_retreat strategy."""
+    result = {}
+    agent_to_remove = target_agent
+    if not agent_to_remove and s.edges:
+        pressures: dict[str, float] = {}
+        for edge in s.edges.values():
+            pressures[edge.from_agent] = pressures.get(edge.from_agent, 0) + edge.pressure
+            pressures[edge.to_agent] = pressures.get(edge.to_agent, 0) + edge.pressure
+        if pressures:
+            agent_to_remove = max(pressures, key=lambda a: pressures[a])
+
+    if agent_to_remove and s.remove_agent(agent_to_remove):
+        result["action"] = f"Removed {agent_to_remove} from coherence kernel"
+        result["remaining_agents"] = s.all_agents()
+    else:
+        result["action"] = "No agent specified or no edges to retreat from"
+    return result
+
+
+def _handle_re_partition(s: Any, target_agent: str | None) -> dict[str, Any]:
+    """Helper to handle re_partition strategy."""
+    result = {}
+    if target_agent and target_agent in s.agent_states:
+        s.agent_states[target_agent] = {}
+        for edge in s.edges.values():
+            if target_agent in (edge.from_agent, edge.to_agent):
+                edge.dual_variable = 0.0
+                edge.primal_residuals.clear()
+                edge.dual_residuals.clear()
+                edge.last_coboundary = 0.0
+        result["action"] = f"Reset {target_agent} state for re-partitioning"
+    else:
+        result["action"] = "Specify target_agent for re_partition"
+        result["available_agents"] = s.all_agents()
+    return result
+
+
+def _handle_admm_reset(s: Any) -> dict[str, Any]:
+    """Helper to handle admm_reset strategy."""
+    for edge in s.edges.values():
+        edge.dual_variable = 0.0
+    s.h1_obstruction = False
+    return {"action": f"Reset dual variables on {len(s.edges)} edges"}
 
 
 @mcp.tool
@@ -299,7 +355,7 @@ def trigger_recovery(strategy: str, target_agent: str | None = None) -> dict[str
         result["post_recovery_status"] = report["closure_status"]
         result["post_recovery_mean_coboundary"] = report["mean_coboundary_norm"]
     else:
-        s.closure_status = ClosureStatus.WEAK
+        s.update_status(ClosureStatus.WEAK)
         result["post_recovery_status"] = s.closure_status.value
 
     save_state()
@@ -357,12 +413,22 @@ def reset_session(confirm: bool = False) -> dict[str, Any]:
         confirm: Must be True to execute. Prevents accidental resets.
     """
     if not confirm:
-        return {"error": "Pass confirm=True to reset. This clears all agent states, dual variables, and ADMM history."}
+        return {
+            "error": (
+                "Pass confirm=True to reset. This clears all agent states, "
+                "dual variables, and ADMM history."
+            )
+        }
     reset_state()
-    return {"status": "Session reset", "default_restriction_maps_loaded": True, "closure_status": ClosureStatus.KERNEL1.value}
+    return {
+        "status": "Session reset",
+        "default_restriction_maps_loaded": True,
+        "closure_status": ClosureStatus.KERNEL1.value
+    }
 
 
 def main() -> None:
+    """Run the Sheaf Consistency Enforcer server using stdio transport."""
     mcp.run(transport="stdio")
 
 

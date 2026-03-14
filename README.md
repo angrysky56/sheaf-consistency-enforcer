@@ -2,7 +2,10 @@
 
 Sheaf Laplacian-based consistency enforcer for **Kernel 1 persistence** across the EFH MCP tool stack.
 
-Closes the "missing piece" identified in `docs/session-findings/2026-03-13-ai-application.md`:
+Part of the [Emergent Functional Hierarchies Framework](https://github.com/angrysky56/Emergent-Functional-Hierarchies-Framework).  
+For full agent operating instructions: [docs/agent-instructions.md](https://github.com/angrysky56/Emergent-Functional-Hierarchies-Framework/blob/main/docs/agent-instructions.md)
+
+Closes the "missing piece" identified in the AI application analysis:
 the automatic feedback loop that detects and recovers from lumpability failures before they cascade.
 
 ## Theory Mapping
