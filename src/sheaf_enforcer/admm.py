@@ -15,11 +15,12 @@ Early-warning signals:
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from typing import Any
 
-from .state import ClosureStatus, EdgeState, SessionState
+from .state import ClosureStatus, SessionState
 
 
 def apply_restriction_map(
@@ -45,8 +46,12 @@ def apply_restriction_map(
         elif isinstance(val, (int, float)):
             numeric = float(val)
         elif isinstance(val, str):
-            # Stable hash: identical strings -> identical projection -> coboundary = 0
-            numeric = (hash(val) % 100_000) / 100_000.0
+            # Deterministic cross-process hash via SHA-256.
+            # Identical strings always produce the same float -> coboundary = 0.
+            # Python's built-in hash() is salted per-process (PEP 456) and would
+            # produce false coboundary spikes after server restarts.
+            digest = hashlib.sha256(val.encode("utf-8")).digest()
+            numeric = int.from_bytes(digest[:4], "big") / 0xFFFFFFFF
         else:
             continue
         projected[to_key] = projected.get(to_key, 0.0) + numeric * weight
@@ -75,12 +80,12 @@ def admm_step(state: SessionState, from_agent: str, to_agent: str) -> dict[str, 
     edge = state.get_or_create_edge(from_agent, to_agent)
 
     from_proj = apply_restriction_map(
-        state.agent_states.get(from_agent, {}),
-        state.get_restriction_map(from_agent, to_agent),
+        agent_state=state.agent_states.get(from_agent, {}),
+        restriction_map=state.get_restriction_map(from_agent, to_agent),
     )
     to_proj = apply_restriction_map(
-        state.agent_states.get(to_agent, {}),
-        state.get_restriction_map(to_agent, from_agent),
+        agent_state=state.agent_states.get(to_agent, {}),
+        restriction_map=state.get_restriction_map(to_agent, from_agent),
     )
 
     # Step 1 + 2: Primal update + Sheaf diffusion
@@ -125,7 +130,12 @@ def detect_h1_obstruction(state: SessionState) -> tuple[bool, str]:
     if len(agents) < 3 or state.admm_iterations < 3:
         return False, "Insufficient agents or iterations for cycle detection"
 
-    threshold = state.dual_warning_threshold * 3
+    # Threshold calibrated to decay steady-state for inconsistent sessions.
+    # With decay_rate=0.15 and cb_norm≈0.5, steady-state dual per edge ≈ 3.33.
+    # Three edges in a cycle at steady state ≈ 10.0.
+    # Multiplier 1.5 → threshold 7.5 fires after ~7 cycles of sustained
+    # inconsistency across a full 3-cycle, while ignoring transient spikes.
+    threshold = state.dual_warning_threshold * 1.5
     max_cycle = 0.0
     worst: list[str] = []
 

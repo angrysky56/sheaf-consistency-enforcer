@@ -10,25 +10,26 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 
 class ClosureStatus(str, Enum):
-    KERNEL1 = "KERNEL1"          # Full causal + computational closure
-    WEAK = "WEAK"                # Weak lumpability - distribution-dependent
-    WARNING = "WARNING"          # Early warning signals active
-    TIMEOUT = "TIMEOUT"          # Coherence timeout - Lambda > tau_{T,m}
-    KERNEL2 = "KERNEL2"          # Collapsed to irreversible hardware
+    KERNEL1 = "KERNEL1"  # Full causal + computational closure
+    WEAK = "WEAK"  # Weak lumpability - distribution-dependent
+    WARNING = "WARNING"  # Early warning signals active
+    TIMEOUT = "TIMEOUT"  # Coherence timeout - Lambda > tau_{T,m}
+    KERNEL2 = "KERNEL2"  # Collapsed to irreversible hardware
 
 
 @dataclass
 class AgentState:
     """Represents the internal consistency pressure of a single agent."""
-    pressure_p: float = 0.0      # Primal pressure
-    pressure_q: float = 0.0      # Dual pressure (rate of change)
+
+    pressure_p: float = 0.0  # Primal pressure
+    pressure_q: float = 0.0  # Dual pressure (rate of change)
     last_action: str = "IDLE"
     last_update: float = 0.0
 
@@ -36,6 +37,7 @@ class AgentState:
 @dataclass
 class EdgeState:
     """Represents the consistency state of a single sheaf edge (dual variables, residuals)."""
+
     from_agent: str
     to_agent: str
     dual_claim: float = 0.0
@@ -93,6 +95,7 @@ class EdgeState:
 @dataclass
 class SessionState:
     """Full enforcer session state."""
+
     # Agent states: agent_id -> AgentState tracking pressure
     agents: dict[str, AgentState] = field(default_factory=dict)
     agent_states: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -126,7 +129,7 @@ class SessionState:
     # Thresholds
     coherence_window_s: float = 30.0
     epsilon_primal: float = 0.15
-    dual_decay_rate: float = 0.15 # Higher decay to resolve pressure faster
+    dual_decay_rate: float = 0.15  # Higher decay to resolve pressure faster
     dual_pressure_per_agent: dict[str, float] = field(default_factory=dict)
     dual_warning_threshold: float = 5.0
     max_stall_cycles: int = 10
@@ -183,13 +186,15 @@ class SessionState:
             self.closure_status = ClosureStatus.KERNEL1
         return True
 
-    def update_status(self, new_status: ClosureStatus | str, message: str | None = None) -> None:
+    def update_status(
+        self, new_status: ClosureStatus | str, message: str | None = None
+    ) -> None:
         """Type-safe status updates with higher priority overrides."""
         if not isinstance(new_status, ClosureStatus):
             # Handle cases where the library or other components pass a string message
-            logging.info(f"STATUS MESSAGE: {new_status}")
+            logging.info("STATUS MESSAGE: %s", new_status)
             if message:
-                logging.info(f"STATUS DETAIL: {message}")
+                logging.info("STATUS DETAIL: %s", message)
             return
 
         # Simple priority: KERNEL1 (least) -> WEAK -> WARNING -> TIMEOUT -> KERNEL2 (most)
@@ -199,19 +204,21 @@ class SessionState:
             ClosureStatus.WEAK: 1,
             ClosureStatus.WARNING: 2,
             ClosureStatus.TIMEOUT: 3,
-            ClosureStatus.KERNEL2: 4
+            ClosureStatus.KERNEL2: 4,
         }
-        
+
         target_prio = priority.get(new_status, 0)
         current_prio = priority.get(self.closure_status, 0)
 
         if target_prio > current_prio:
             old_status = self.closure_status
             self.closure_status = new_status
-            log_msg = f"STATUS ESCALATION: {old_status.name} -> {new_status.name}"
+            log_msg = "STATUS ESCALATION: %s -> %s"
+            args = [old_status.name, new_status.name]
             if message:
-                log_msg += f" - {message}"
-            logging.info(log_msg)
+                log_msg += " - %s"
+                args.append(message)
+            logging.info(log_msg, *args)
         elif target_prio < current_prio:
             # Optionally log that we are ignoring a lower-priority state
             pass
@@ -259,7 +266,7 @@ _session: SessionState | None = None
 
 def get_state() -> SessionState:
     """Get the singleton session state, loading from disk if necessary."""
-    global _session # pylint: disable=global-statement
+    global _session  # pylint: disable=global-statement
     if _session is None:
         _session = load_state()
     return _session
@@ -267,16 +274,24 @@ def get_state() -> SessionState:
 
 def load_state() -> SessionState:
     """Load session state from JSON file."""
-    _state = SessionState() # Initialize with default
+    _state = SessionState()  # Initialize with default
     if _STATE_PATH.exists():
         try:
             with open(_STATE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 _state = SessionState.from_dict(data)
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            logging.warning("Could not load session state from %s: %s. Initializing new state.", _STATE_PATH, e)
-        except Exception as e: # pylint: disable=broad-exception-caught
-            logging.error("Unexpected error loading session state from %s: %s. Initializing new state.", _STATE_PATH, e)
+            logging.warning(
+                "Could not load session state from %s: %s. Initializing new state.",
+                _STATE_PATH,
+                e,
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.error(
+                "Unexpected error loading session state from %s: %s. Initializing new state.",
+                _STATE_PATH,
+                e,
+            )
     _seed_default_restriction_maps(_state)
     return _state
 
@@ -287,13 +302,13 @@ def save_state() -> None:
     try:
         with open(_STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state.to_dict(), f, indent=2)
-    except Exception as e: # pylint: disable=broad-exception-caught
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logging.error("Could not save session state to %s: %s", _STATE_PATH, e)
 
 
 def reset_state() -> None:
     """Reset the singleton session state to defaults and save."""
-    global _session # pylint: disable=global-statement
+    global _session  # pylint: disable=global-statement
     _session = SessionState()
     _seed_default_restriction_maps(_session)
     save_state()
@@ -302,6 +317,7 @@ def reset_state() -> None:
 # ---------------------------------------------------------------------------
 # Default restriction maps for the EFH MCP stack
 # ---------------------------------------------------------------------------
+
 
 def _seed_default_restriction_maps(state: SessionState) -> None:
     """
@@ -320,49 +336,82 @@ def _seed_default_restriction_maps(state: SessionState) -> None:
     maps: dict[str, list[dict]] = {
         # hipai-montague <-> mcp-logic
         f"hipai-montague{arrow}mcp-logic": [
-            {"from_key": "last_assertion",     "to_key": "edge_claim",        "weight": 1.0},
-            {"from_key": "belief_score",       "to_key": "edge_confidence",   "weight": 1.0},
-            {"from_key": "inconsistency_flag", "to_key": "edge_inconsistent", "weight": 1.0},
+            {"from_key": "last_assertion", "to_key": "edge_claim", "weight": 1.0},
+            {"from_key": "belief_score", "to_key": "edge_confidence", "weight": 1.0},
+            {
+                "from_key": "inconsistency_flag",
+                "to_key": "edge_inconsistent",
+                "weight": 1.0,
+            },
         ],
         f"mcp-logic{arrow}hipai-montague": [
-            {"from_key": "last_proof_result",    "to_key": "edge_claim",        "weight": 1.0},
-            {"from_key": "proof_confidence",     "to_key": "edge_confidence",   "weight": 1.0},
-            {"from_key": "contradictions_found", "to_key": "edge_inconsistent", "weight": 1.0},
+            {"from_key": "last_proof_result", "to_key": "edge_claim", "weight": 1.0},
+            {
+                "from_key": "proof_confidence",
+                "to_key": "edge_confidence",
+                "weight": 1.0,
+            },
+            {
+                "from_key": "contradictions_found",
+                "to_key": "edge_inconsistent",
+                "weight": 1.0,
+            },
         ],
         # mcp-logic <-> advanced-reasoning
         f"mcp-logic{arrow}advanced-reasoning": [
-            {"from_key": "last_proof_result",    "to_key": "edge_claim",        "weight": 1.0},
-            {"from_key": "proof_confidence",     "to_key": "edge_confidence",   "weight": 1.0},
-            {"from_key": "contradictions_found", "to_key": "edge_inconsistent", "weight": 1.0},
+            {"from_key": "last_proof_result", "to_key": "edge_claim", "weight": 1.0},
+            {
+                "from_key": "proof_confidence",
+                "to_key": "edge_confidence",
+                "weight": 1.0,
+            },
+            {
+                "from_key": "contradictions_found",
+                "to_key": "edge_inconsistent",
+                "weight": 1.0,
+            },
         ],
         f"advanced-reasoning{arrow}mcp-logic": [
-            {"from_key": "current_hypothesis", "to_key": "edge_claim",        "weight": 1.0},
-            {"from_key": "confidence_score",   "to_key": "edge_confidence",   "weight": 1.0},
-            {"from_key": "halt_flag",          "to_key": "edge_inconsistent", "weight": 1.0},
+            {"from_key": "current_hypothesis", "to_key": "edge_claim", "weight": 1.0},
+            {
+                "from_key": "confidence_score",
+                "to_key": "edge_confidence",
+                "weight": 1.0,
+            },
+            {"from_key": "halt_flag", "to_key": "edge_inconsistent", "weight": 1.0},
         ],
         # advanced-reasoning <-> hipai-montague
         f"advanced-reasoning{arrow}hipai-montague": [
-            {"from_key": "verified_claim",   "to_key": "edge_claim",        "weight": 1.0},
-            {"from_key": "confidence_score", "to_key": "edge_confidence",   "weight": 1.0},
-            {"from_key": "halt_flag",        "to_key": "edge_inconsistent", "weight": 1.0},
+            {"from_key": "verified_claim", "to_key": "edge_claim", "weight": 1.0},
+            {
+                "from_key": "confidence_score",
+                "to_key": "edge_confidence",
+                "weight": 1.0,
+            },
+            {"from_key": "halt_flag", "to_key": "edge_inconsistent", "weight": 1.0},
         ],
         f"hipai-montague{arrow}advanced-reasoning": [
-            {"from_key": "last_assertion",     "to_key": "edge_claim",        "weight": 1.0},
-            {"from_key": "belief_score",       "to_key": "edge_confidence",   "weight": 1.0},
-            {"from_key": "inconsistency_flag", "to_key": "edge_inconsistent", "weight": 1.0},
+            {"from_key": "last_assertion", "to_key": "edge_claim", "weight": 1.0},
+            {"from_key": "belief_score", "to_key": "edge_confidence", "weight": 1.0},
+            {
+                "from_key": "inconsistency_flag",
+                "to_key": "edge_inconsistent",
+                "weight": 1.0,
+            },
         ],
         # verifier-graph -> * (hub, one-way provenance)
+        # Only compares edge_claim — the hub confirms claims are verified.
+        # chain_length is NOT mapped to edge_confidence: chain_length is an integer
+        # (e.g. 5) and would project as 2.5 (weight 0.5) vs confidence 0.95,
+        # producing a false coboundary spike of ~1.55 on every hub edge.
         f"verifier-graph{arrow}hipai-montague": [
-            {"from_key": "last_verified_claim", "to_key": "edge_claim",      "weight": 1.0},
-            {"from_key": "chain_length",        "to_key": "edge_confidence", "weight": 0.5},
+            {"from_key": "last_verified_claim", "to_key": "edge_claim", "weight": 1.0},
         ],
         f"verifier-graph{arrow}mcp-logic": [
-            {"from_key": "last_verified_claim", "to_key": "edge_claim",      "weight": 1.0},
-            {"from_key": "chain_length",        "to_key": "edge_confidence", "weight": 0.5},
+            {"from_key": "last_verified_claim", "to_key": "edge_claim", "weight": 1.0},
         ],
         f"verifier-graph{arrow}advanced-reasoning": [
-            {"from_key": "last_verified_claim", "to_key": "edge_claim",      "weight": 1.0},
-            {"from_key": "chain_length",        "to_key": "edge_confidence", "weight": 0.5},
+            {"from_key": "last_verified_claim", "to_key": "edge_claim", "weight": 1.0},
         ],
     }
     state.restriction_maps.update(maps)

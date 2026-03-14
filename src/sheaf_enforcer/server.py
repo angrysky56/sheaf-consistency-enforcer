@@ -127,9 +127,7 @@ def get_closure_status() -> dict[str, Any]:
         "h1_obstruction": s.h1_obstruction,
         "admm_iterations": s.admm_iterations,
         "active_agents": s.all_agents(),
-        "agent_last_seen": {
-            a: round(now - t, 1) for a, t in s.agent_last_seen.items()
-        },
+        "agent_last_seen": {a: round(now - t, 1) for a, t in s.agent_last_seen.items()},
         "edge_health": edge_summaries[:6],
         "thresholds": {
             "epsilon_primal": s.epsilon_primal,
@@ -138,6 +136,7 @@ def get_closure_status() -> dict[str, Any]:
         },
         "interpretation": _interpret_status(s),
     }
+
 
 def _interpret_status(s) -> str:
     match s.closure_status:
@@ -189,7 +188,7 @@ def set_restriction_map(
     return {
         "edge": eid,
         "map_entries": len(s.restriction_maps[eid]),
-        "mappings": s.restriction_maps[eid]
+        "mappings": s.restriction_maps[eid],
     }
 
 
@@ -206,13 +205,18 @@ def get_edge_report(from_agent: str, to_agent: str) -> dict[str, Any]:
     eid = f"{from_agent}{arrow}{to_agent}"
     edge = s.edges.get(eid)
     if edge is None:
-        return {"error": f"No edge data for {eid}. Run run_admm_cycle first.", "known_edges": list(s.edges.keys())}
+        return {
+            "error": f"No edge data for {eid}. Run run_admm_cycle first.",
+            "known_edges": list(s.edges.keys()),
+        }
 
     rmap = s.get_restriction_map(from_agent, to_agent)
-    from_proj = apply_restriction_map(s.agent_states.get(from_agent, {}), rmap)
+    from_proj = apply_restriction_map(
+        agent_state=s.agent_states.get(from_agent, {}), restriction_map=rmap
+    )
     to_proj = apply_restriction_map(
-        s.agent_states.get(to_agent, {}),
-        s.get_restriction_map(to_agent, from_agent)
+        agent_state=s.agent_states.get(to_agent, {}),
+        restriction_map=s.get_restriction_map(to_agent, from_agent),
     )
 
     return {
@@ -240,7 +244,9 @@ def _handle_kernel_retreat(s: Any, target_agent: str | None) -> dict[str, Any]:
     if not agent_to_remove and s.edges:
         pressures: dict[str, float] = {}
         for edge in s.edges.values():
-            pressures[edge.from_agent] = pressures.get(edge.from_agent, 0) + edge.pressure
+            pressures[edge.from_agent] = (
+                pressures.get(edge.from_agent, 0) + edge.pressure
+            )
             pressures[edge.to_agent] = pressures.get(edge.to_agent, 0) + edge.pressure
         if pressures:
             agent_to_remove = max(pressures, key=lambda a: pressures[a])
@@ -296,7 +302,10 @@ def trigger_recovery(strategy: str, target_agent: str | None = None) -> dict[str
         target_agent: Required for re_partition; optional for kernel_retreat.
     """
     s = get_state()
-    result: dict[str, Any] = {"strategy": strategy, "pre_recovery_status": s.closure_status.value}
+    result: dict[str, Any] = {
+        "strategy": strategy,
+        "pre_recovery_status": s.closure_status.value,
+    }
 
     if strategy == "kernel_retreat":
         if target_agent and target_agent in s.agent_states:
@@ -304,19 +313,31 @@ def trigger_recovery(strategy: str, target_agent: str | None = None) -> dict[str
             s.agent_last_seen.pop(target_agent, None)
             for k in [k for k in s.edges if target_agent in k]:
                 del s.edges[k]
+            s.closure_status = (
+                ClosureStatus.KERNEL1
+            )  # allow re-evaluation after removal
             result["action"] = f"Removed {target_agent} from coherence kernel"
             result["remaining_agents"] = s.all_agents()
         elif s.edges:
             pressures: dict[str, float] = {}
             for edge in s.edges.values():
-                pressures[edge.from_agent] = pressures.get(edge.from_agent, 0) + edge.pressure
-                pressures[edge.to_agent] = pressures.get(edge.to_agent, 0) + edge.pressure
+                pressures[edge.from_agent] = (
+                    pressures.get(edge.from_agent, 0) + edge.pressure
+                )
+                pressures[edge.to_agent] = (
+                    pressures.get(edge.to_agent, 0) + edge.pressure
+                )
             worst = max(pressures, key=lambda a: pressures[a])
             s.agent_states.pop(worst, None)
             s.agent_last_seen.pop(worst, None)
             for k in [k for k in s.edges if worst in k]:
                 del s.edges[k]
-            result["action"] = f"Auto-retreated: removed {worst} (highest pressure {pressures[worst]:.3f})"
+            s.closure_status = (
+                ClosureStatus.KERNEL1
+            )  # allow re-evaluation after removal
+            result["action"] = (
+                f"Auto-retreated: removed {worst} (highest pressure {pressures[worst]:.3f})"
+            )
             result["remaining_agents"] = s.all_agents()
         else:
             result["action"] = "No edges to retreat from"
@@ -339,16 +360,25 @@ def trigger_recovery(strategy: str, target_agent: str | None = None) -> dict[str
         for edge in s.edges.values():
             edge.dual_variable = 0.0
         s.h1_obstruction = False
+        s.closure_status = (
+            ClosureStatus.KERNEL1
+        )  # explicit de-escalate after full reset
         result["action"] = f"Reset dual variables on {len(s.edges)} edges"
 
     elif strategy == "soft_relax":
-        result["action"] = "Soft-relax mode: ADMM will converge to approximate solution."
+        result["action"] = (
+            "Soft-relax mode: ADMM will converge to approximate solution."
+        )
 
     elif strategy == "fusion":
-        result["action"] = "Re-register all fragment agents via register_agent_state, then run run_admm_cycle."
+        result["action"] = (
+            "Re-register all fragment agents via register_agent_state, then run run_admm_cycle."
+        )
 
     else:
-        return {"error": f"Unknown strategy: {strategy}. Use: kernel_retreat, re_partition, admm_reset, soft_relax, fusion"}
+        return {
+            "error": f"Unknown strategy: {strategy}. Use: kernel_retreat, re_partition, admm_reset, soft_relax, fusion"
+        }
 
     if len(s.agent_states) >= 2:
         report = run_full_cycle(s)
@@ -423,7 +453,7 @@ def reset_session(confirm: bool = False) -> dict[str, Any]:
     return {
         "status": "Session reset",
         "default_restriction_maps_loaded": True,
-        "closure_status": ClosureStatus.KERNEL1.value
+        "closure_status": ClosureStatus.KERNEL1.value,
     }
 
 
