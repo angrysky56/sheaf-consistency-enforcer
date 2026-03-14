@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "sheaf-consistency-enforcer": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/your/path/to/sheaf-consistency-enforcer",
+        "run",
+        "sheaf-enforcer"
+      ]
+    }
+  }
+}
