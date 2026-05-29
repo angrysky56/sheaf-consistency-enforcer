@@ -211,12 +211,14 @@ def get_edge_report(from_agent: str, to_agent: str) -> dict[str, Any]:
         }
 
     rmap = s.get_restriction_map(from_agent, to_agent)
+    # Reverse map: project to_agent's state back toward from_agent for coboundary comparison
+    reverse_rmap = s.get_restriction_map(to_agent, from_agent)
     from_proj = apply_restriction_map(
         agent_state=s.agent_states.get(from_agent, {}), restriction_map=rmap
     )
     to_proj = apply_restriction_map(
         agent_state=s.agent_states.get(to_agent, {}),
-        restriction_map=s.get_restriction_map(to_agent, from_agent),
+        restriction_map=reverse_rmap,
     )
 
     return {
@@ -286,7 +288,9 @@ def _handle_admm_reset(s: Any) -> dict[str, Any]:
 
 
 @mcp.tool
-def trigger_recovery(strategy: str, target_agent: str | None = None) -> dict[str, Any]:
+def trigger_recovery(
+    strategy: str, target_agent: str | None = None, reason: str | None = None
+) -> dict[str, Any]:
     """
     Execute a recovery strategy to restore Kernel 1 persistence.
 
@@ -300,11 +304,13 @@ def trigger_recovery(strategy: str, target_agent: str | None = None) -> dict[str
     Args:
         strategy: kernel_retreat | re_partition | admm_reset | soft_relax | fusion
         target_agent: Required for re_partition; optional for kernel_retreat.
+        reason: Optional human-readable description of why this recovery was triggered.
     """
     s = get_state()
     result: dict[str, Any] = {
         "strategy": strategy,
         "pre_recovery_status": s.closure_status.value,
+        "reason": reason,
     }
 
     if strategy == "kernel_retreat":

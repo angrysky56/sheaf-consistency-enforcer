@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Sheaf Laplacian consistency enforcer for Kernel 1 persistence across MCP tool layers"
 requires-python = ">=3.12"
 dependencies = [
-    "fastmcp>=2.0.0",
+    "fastmcp==3.2.4",
     "numpy>=1.26.0",
 ]
 
